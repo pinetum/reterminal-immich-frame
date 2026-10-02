@@ -8,6 +8,11 @@ Immich 數位相框：從指定相簿抓照片、依序或隨機輪播，用機�
 
 以**省電**為設計前提：裝置幾乎都在深度睡眠，每次醒來只做一件事就回去睡。
 
+> ### ⚡ [用瀏覽器直接燒錄](https://pinetum.github.io/reterminal-immich-frame/)
+>
+> <https://pinetum.github.io/reterminal-immich-frame/> —— 板子插上 USB-C，按一個按鈕就好。
+> 不用裝 PlatformIO，不用工具鏈。需要桌機版的 Chrome / Edge / Opera（Web Serial）。
+
 ---
 
 ## 功能
@@ -54,6 +59,9 @@ LED（反向邏輯，LOW = 亮） | 48
 ---
 
 ## 編譯與燒錄
+
+只有要改程式才需要這一段。單純想裝韌體的話，用[瀏覽器燒錄頁](https://pinetum.github.io/reterminal-immich-frame/)，
+或是任一個 [release](https://github.com/pinetum/reterminal-immich-frame/releases) 附的映像檔。
 
 需要 [PlatformIO](https://platformio.org/)。若還沒安裝：
 
@@ -287,6 +295,37 @@ gh release create v1.0.0 dist/* --title "v1.0.0" --notes-file dist/FLASHING.md
 ```
 
 `dist/` 已經在 .gitignore 裡。
+
+---
+
+## 瀏覽器燒錄頁（GitHub Pages）
+
+`docs/` 是一頁式的 [ESP Web Tools](https://esphome.github.io/esp-web-tools/)
+安裝器，由 `.github/workflows/pages.yml` 在每次發佈 release 時自動部署。沒聽過
+PlatformIO 的人只要用 Chrome 開那一頁、插上板子，就能燒。
+
+網址是 **<https://pinetum.github.io/reterminal-immich-frame/>**。
+
+別人 fork 走要啟用的話：**Settings → Pages → Source → GitHub Actions**，然後發一個
+release（或手動跑 workflow）。頁面會自己從網址推出 owner 與 repo 名稱，
+`docs/index.html` 一個字都不用改。
+
+### 為什麼不是由網頁直接去抓 release 附件
+
+讓網頁在載入時直接抓 release 的檔案會更漂亮，但**做不到**：GitHub 的 release
+附件由 `release-assets.githubusercontent.com` 提供，回應裡**完全沒有
+`access-control-allow-origin`**，瀏覽器會擋下這個跨來源請求。改走
+`api.github.com/repos/.../releases/assets/<id>` 也一樣 —— API 那層的 302 確實有
+`access-control-allow-origin: *`，但它重導過去的附件主機沒有，而瀏覽器看的是
+最終那個回應。
+
+所以改成由 workflow 在伺服器端做（那裡沒有 CORS 的問題）：用 `gh release download`
+把 `*-merged.bin` 抓下來，旁邊寫一份 `manifest.json`，連同網頁一起部署。這樣
+binary 就與網頁同源，抓取不會有任何問題。燒錄來源確實就是 release 的附件，只是
+在**部署時**解析，而不是在頁面載入時。
+
+想重新發佈舊的 tag，或改完 `docs/` 之後想重建網頁，到
+**Actions → Deploy web flasher → Run workflow** 手動跑並指定 tag 即可。
 
 ---
 

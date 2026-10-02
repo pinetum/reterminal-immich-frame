@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Flash reTerminal E1004 — Immich Photo Frame</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><text y='14' font-size='14'>🖼️</text></svg>">
+<script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    --bg: #fbfbfa; --fg: #1a1a18; --muted: #6b6b64; --line: #e3e3dd;
+    --card: #ffffff; --accent: #2f6f4f; --warn-bg: #fdf6e3; --warn-line: #e8d9a8;
+    --code-bg: #f3f3ef;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #16171a; --fg: #e8e8e4; --muted: #9a9a92; --line: #2c2e33;
+      --card: #1d1f23; --accent: #7fc3a0; --warn-bg: #2a2518; --warn-line: #4a4230;
+      --code-bg: #24262b;
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 2.5rem 1.25rem 4rem;
+    background: var(--bg); color: var(--fg);
+    font: 16px/1.65 ui-sans-serif, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  main { max-width: 46rem; margin: 0 auto; }
+  h1 { font-size: 1.75rem; line-height: 1.25; margin: 0 0 .4rem; letter-spacing: -.02em; }
+  h2 { font-size: 1.05rem; margin: 2.5rem 0 .75rem; letter-spacing: -.01em; }
+  .sub { color: var(--muted); margin: 0 0 2rem; }
+  a { color: var(--accent); }
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    padding: 1.5rem; margin: 0 0 1.25rem;
+  }
+  .release { display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: baseline;
+             margin-bottom: 1.25rem; font-size: .9rem; color: var(--muted); }
+  .tag { font: 600 .9rem/1 ui-monospace, SFMono-Regular, Menlo, monospace;
+         background: var(--code-bg); border: 1px solid var(--line);
+         border-radius: 999px; padding: .35rem .7rem; color: var(--fg); }
+  /* ESP Web Tools renders the slotted children as-is, so the button is ours
+     to style. The element only upgrades -- and only shows the activate slot --
+     when the browser has Web Serial, so an unstyled flash of this is brief. */
+  esp-web-install-button button[slot="activate"] {
+    font: 600 .95rem/1 inherit; font-family: inherit;
+    background: var(--accent); color: #fff;
+    border: 0; border-radius: 9px; padding: .8rem 1.4rem; cursor: pointer;
+  }
+  esp-web-install-button button[slot="activate"]:hover { filter: brightness(1.08); }
+  esp-web-install-button button[slot="activate"]:active { transform: translateY(1px); }
+  esp-web-install-button [slot="unsupported"],
+  esp-web-install-button [slot="not-allowed"] {
+    display: block; font-size: .92rem; color: var(--muted);
+  }
+  .note { background: var(--warn-bg); border: 1px solid var(--warn-line);
+          border-radius: 10px; padding: .9rem 1.1rem; font-size: .92rem; }
+  code, pre { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+  code { background: var(--code-bg); border-radius: 5px; padding: .12em .4em; font-size: .88em; }
+  pre { background: var(--code-bg); border: 1px solid var(--line); border-radius: 10px;
+        padding: 1rem; overflow-x: auto; font-size: .85rem; line-height: 1.55; }
+  pre code { background: none; padding: 0; font-size: 1em; }
+  ol, ul { padding-left: 1.3rem; }
+  li { margin: .35rem 0; }
+  footer { margin-top: 3rem; padding-top: 1.25rem; border-top: 1px solid var(--line);
+           color: var(--muted); font-size: .88rem; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <h1>reTerminal E1004 — Immich Photo Frame</h1>
+  <p class="sub">Flash the firmware straight from your browser. No PlatformIO, no toolchain.</p>
+
+  <div class="card">
+    <div class="release">
+      <span class="tag" id="tag">loading…</span>
+      <span id="built"></span>
+      <a id="notes" href="#" hidden>Release notes →</a>
+    </div>
+
+    <esp-web-install-button id="installer" manifest="manifest.json">
+      <button slot="activate">Connect &amp; install</button>
+      <span slot="unsupported">
+        Your browser cannot talk to serial devices. Use <strong>Chrome</strong>,
+        <strong>Edge</strong> or <strong>Opera</strong> on a desktop —
+        Safari and Firefox have no Web Serial support, and neither does any
+        browser on iOS.
+      </span>
+      <span slot="not-allowed">
+        This page has to be served over HTTPS to access the serial port.
+      </span>
+    </esp-web-install-button>
+  </div>
+
+  <div class="note">
+    <strong>Before you click.</strong> Plug the board in over USB-C. If the
+    installer cannot find it, or the connection drops immediately, put the board
+    into its bootloader by hand: hold <strong>Boot</strong>, tap
+    <strong>Reset</strong>, release <strong>Boot</strong>, then try again.
+    <br><br>
+    Choosing <em>Erase device</em> wipes the saved Wi-Fi credentials, Immich API
+    key and album selection along with the firmware. On a first install that is
+    what you want; on an update it is not.
+  </div>
+
+  <h2>After flashing</h2>
+  <ol>
+    <li>Insert a FAT32 microSD card (64&nbsp;GB or smaller).</li>
+    <li>The first boot has no configuration, so the device starts its own
+        Wi-Fi access point and shows the details on the panel. Expect to wait
+        about 40&nbsp;seconds — that is one E&nbsp;Ink full refresh, not a hang.</li>
+    <li>Join <code>reTerminal-E1004-XXXX</code> (password <code>immich1004</code>),
+        then open <code>http://192.168.4.1</code> or scan the QR code on screen.</li>
+    <li>Set Wi-Fi, the Immich server URL and an API key, then pick an album.</li>
+  </ol>
+  <p>The full walkthrough is in
+     <a id="readme" href="#">the README</a>.</p>
+
+  <h2>Doing it from a terminal instead</h2>
+  <p>Same image, same result:</p>
+  <pre><code>esptool.py --chip esp32s3 --port /dev/ttyUSB0 --baud 460800 \
+    write_flash -z 0x0 <span id="binname">…</span></code></pre>
+  <p>Every image, offset and checksum is attached to
+     <a id="releases" href="#">each release</a>.</p>
+
+  <footer>
+    Logs come out on <strong>GPIO43 (TX) / GPIO44 (RX) at 115200</strong>, not USB
+    CDC. Flashing uses <a href="https://esphome.github.io/esp-web-tools/">ESP Web
+    Tools</a> and happens entirely in your browser — nothing is uploaded anywhere.
+    <span id="source"></span>
+  </footer>
+</main>
+
+<script>
+  // Everything below is cosmetic: the actual flash source is manifest.json,
+  // which the deploy workflow writes next to the binaries it pulled out of the
+  // release. The repo is derived from the Pages URL so this file needs no
+  // editing when it is forked -- https://OWNER.github.io/REPO/.
+  const [owner] = location.hostname.split(".");
+  const repo = location.pathname.split("/").filter(Boolean)[0] || "";
+  const base = repo ? `https://github.com/${owner}/${repo}` : "";
+
+  if (base) {
+    document.getElementById("readme").href = base + "#readme";
+    document.getElementById("releases").href = base + "/releases";
+    document.getElementById("source").innerHTML =
+      ` <a href="${base}">Source</a>.`;
+  }
+
+  fetch("manifest.json", { cache: "no-store" })
+    .then((r) => r.json())
+    .then((m) => {
+      const tag = m.version || "unknown";
+      document.getElementById("tag").textContent = tag;
+      if (m.built_at) {
+        document.getElementById("built").textContent =
+          "published " + new Date(m.built_at).toLocaleDateString(undefined,
+            { year: "numeric", month: "short", day: "numeric" });
+      }
+      const path = m.builds?.[0]?.parts?.[0]?.path;
+      if (path) document.getElementById("binname").textContent = path.split("/").pop();
+      if (base && m.version) {
+        const n = document.getElementById("notes");
+        n.href = `${base}/releases/tag/${tag}`;
+        n.hidden = false;
+      }
+    })
+    .catch(() => {
+      document.getElementById("tag").textContent = "no release published yet";
+      document.getElementById("installer").hidden = true;
+    });
+</script>
+</body>
+</html>

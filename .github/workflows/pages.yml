@@ -1,0 +1,102 @@
+# Publishes the browser flasher in docs/ to GitHub Pages, with the binaries
+# taken from a GitHub release.
+#
+# Why the binaries are copied rather than fetched by the page: GitHub serves
+# release assets from release-assets.githubusercontent.com WITHOUT any
+# access-control-allow-origin header, so a browser fetch() from the Pages origin
+# is blocked. (Going through api.github.com does not help -- the API's 302 does
+# carry ACAO, but the redirect target it points at does not, and the browser
+# checks the final response.) Pulling the asset here, server-side, where CORS
+# does not apply, and serving it from the same origin as the page is what makes
+# this work at all.
+name: Deploy web flasher
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Release tag to publish (default: the latest release)"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Never let two deploys race; let a newer release win rather than queue behind.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Work out which release to serve
+        id: rel
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="${{ github.event.release.tag_name || inputs.tag }}"
+          if [ -z "$TAG" ]; then
+            TAG=$(gh release view --json tagName -q .tagName)
+            echo "no tag given, using the latest release: $TAG"
+          fi
+          PUBLISHED=$(gh release view "$TAG" --json publishedAt -q .publishedAt)
+          echo "tag=$TAG"             >> "$GITHUB_OUTPUT"
+          echo "published=$PUBLISHED" >> "$GITHUB_OUTPUT"
+
+      - name: Fetch the merged image from the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          mkdir -p site/firmware
+          gh release download "${{ steps.rel.outputs.tag }}" \
+            --pattern '*-merged.bin' --dir site/firmware
+          BIN=$(cd site/firmware && ls *-merged.bin | head -1)
+          [ -n "$BIN" ] || { echo "::error::no *-merged.bin in release ${{ steps.rel.outputs.tag }}"; exit 1; }
+          echo "serving $BIN ($(stat -c%s "site/firmware/$BIN") bytes)"
+          echo "BIN=$BIN" >> "$GITHUB_ENV"
+
+      - name: Assemble the site
+        run: |
+          set -euo pipefail
+          cp -r docs/. site/
+          # The merged image already starts at 0x0 and carries the bootloader,
+          # the partition table and boot_app0, so ESP Web Tools needs one part.
+          cat > site/manifest.json <<EOF
+          {
+            "name": "reTerminal E1004 — Immich Photo Frame",
+            "version": "${{ steps.rel.outputs.tag }}",
+            "built_at": "${{ steps.rel.outputs.published }}",
+            "new_install_prompt_erase": true,
+            "builds": [
+              {
+                "chipFamily": "ESP32-S3",
+                "parts": [
+                  { "path": "firmware/$BIN", "offset": 0 }
+                ]
+              }
+            ]
+          }
+          EOF
+          python3 -c "import json;json.load(open('site/manifest.json'))"
+          echo "--- site/"
+          find site -type f | sort
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

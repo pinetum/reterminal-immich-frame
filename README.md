@@ -10,6 +10,12 @@ with the front keys, and is configured entirely from a built-in web page.
 Designed around **battery life**: the device is asleep nearly all the time and
 does exactly one thing each time it wakes.
 
+> ### ⚡ [Flash it from your browser](https://pinetum.github.io/reterminal-immich-frame/)
+>
+> <https://pinetum.github.io/reterminal-immich-frame/> — plug the board in over USB-C and
+> click one button. No PlatformIO, no toolchain. Needs Chrome, Edge or Opera on
+> a desktop (Web Serial).
+
 ---
 
 ## Features
@@ -63,6 +69,10 @@ Debug UART | TX 43, RX 44 @115200
 ---
 
 ## Building and flashing
+
+Only needed if you want to change the code — to just install the firmware, use
+the [browser flasher](https://pinetum.github.io/reterminal-immich-frame/) or the images
+attached to any [release](https://github.com/pinetum/reterminal-immich-frame/releases).
 
 You need [PlatformIO](https://platformio.org/). If you do not have it:
 
@@ -331,6 +341,41 @@ gh release create v1.0.0 dist/* --title "v1.0.0" --notes-file dist/FLASHING.md
 ```
 
 `dist/` is gitignored.
+
+---
+
+## Browser flasher (GitHub Pages)
+
+`docs/` is a one-page [ESP Web Tools](https://esphome.github.io/esp-web-tools/)
+installer, published by `.github/workflows/pages.yml` whenever a release is
+published. Someone who has never heard of PlatformIO can open the page in
+Chrome, plug the board in, and flash it.
+
+It is live at **<https://pinetum.github.io/reterminal-immich-frame/>**.
+
+To turn it on in a fork: **Settings → Pages → Source → GitHub Actions**, then
+publish a release (or run the workflow by hand). The page reads the owner and
+repository name out of its own URL, so `docs/index.html` needs no edits.
+
+### Why the page does not fetch the release asset directly
+
+It would be neater for the page to pull the binary from the release at load
+time, and that does not work: GitHub serves release assets from
+`release-assets.githubusercontent.com` with **no `access-control-allow-origin`
+header**, so the browser blocks the cross-origin fetch. Routing through
+`api.github.com/repos/.../releases/assets/<id>` does not help either — the API's
+302 does carry `access-control-allow-origin: *`, but the asset host it redirects
+to does not, and the browser checks the final response.
+
+So the workflow does it server-side instead, where CORS does not exist: it
+downloads `*-merged.bin` from the release with `gh release download`, writes
+`manifest.json` beside it, and deploys both with the page. The binary is then
+same-origin and fetches cleanly. The flash source really is the release
+attachment — it is just resolved at deploy time rather than at page load.
+
+To republish an older tag, or to rebuild the page after editing `docs/`, run the
+workflow manually (**Actions → Deploy web flasher → Run workflow**) and give it
+a tag.
 
 ---
 
