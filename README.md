@@ -307,6 +307,33 @@ those files to compile on a desktop.
 
 ---
 
+## Cutting a release
+
+```bash
+./tools/package-release.sh v1.0.0
+```
+
+That builds the firmware and fills `dist/` with everything a release needs: the
+four flash images, a **merged image** covering the flash from 0x0 (so someone
+who has never installed PlatformIO can flash with a single esptool command, and
+so ESP Web Tools can serve it), the ELF for decoding panic backtraces, a
+`SHA256SUMS`, and a `FLASHING.md` with the exact offsets.
+
+The ESP32-S3 bootloader lives at **0x0**, not at 0x1000 as on the original
+ESP32. The script reads the offsets out of the build environment rather than
+hard-coding them from memory
+(`pio run -t envdump | grep -A6 FLASH_EXTRA_IMAGES`).
+
+Then, with the [GitHub CLI](https://cli.github.com/):
+
+```bash
+gh release create v1.0.0 dist/* --title "v1.0.0" --notes-file dist/FLASHING.md
+```
+
+`dist/` is gitignored.
+
+---
+
 ## Architecture
 
 ```

@@ -266,6 +266,30 @@ PlatformIO：
 
 ---
 
+## 發佈 release
+
+```bash
+./tools/package-release.sh v1.0.0
+```
+
+它會編譯並把 release 需要的東西全部放進 `dist/`：四個燒錄映像、一個從 0x0
+開始的**合併映像**（這樣沒裝過 PlatformIO 的人只要一行 esptool 就能燒，也可以
+直接餵給 ESP Web Tools）、用來還原 panic backtrace 的 ELF、`SHA256SUMS`，以及
+寫明各段偏移的 `FLASHING.md`。
+
+ESP32-S3 的 bootloader 在 **0x0**，不是原始 ESP32 的 0x1000。腳本裡的偏移是從
+build 環境讀出來的，不是憑印象寫死的（`pio run -t envdump | grep -A6 FLASH_EXTRA_IMAGES`）。
+
+接著用 [GitHub CLI](https://cli.github.com/)：
+
+```bash
+gh release create v1.0.0 dist/* --title "v1.0.0" --notes-file dist/FLASHING.md
+```
+
+`dist/` 已經在 .gitignore 裡。
+
+---
+
 ## 架構
 
 ```
