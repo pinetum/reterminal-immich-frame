@@ -94,7 +94,14 @@ jobs:
           echo "--- site/"
           find site -type f | sort
 
+      # enablement:true turns Pages on via the API if it is off, instead of
+      # failing with "Get Pages site failed ... Not Found". It needs the
+      # pages:write permission declared above, and it configures the site for
+      # Actions deployment -- so a fresh clone or a fork never has to visit
+      # Settings -> Pages by hand.
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
       - uses: actions/upload-pages-artifact@v3
         with:
           path: site

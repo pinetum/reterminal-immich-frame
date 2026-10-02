@@ -353,9 +353,10 @@ Chrome, plug the board in, and flash it.
 
 It is live at **<https://pinetum.github.io/reterminal-immich-frame/>**.
 
-To turn it on in a fork: **Settings → Pages → Source → GitHub Actions**, then
-publish a release (or run the workflow by hand). The page reads the owner and
-repository name out of its own URL, so `docs/index.html` needs no edits.
+
+If that first run fails with a 403 instead, the repository has Actions blocked
+from managing Pages: **Settings → Pages → Source → GitHub Actions** does the
+same thing by hand, once.
 
 ### Why the page does not fetch the release asset directly
 

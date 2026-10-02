@@ -306,9 +306,6 @@ PlatformIO 的人只要用 Chrome 開那一頁、插上板子，就能燒。
 
 網址是 **<https://pinetum.github.io/reterminal-immich-frame/>**。
 
-別人 fork 走要啟用的話：**Settings → Pages → Source → GitHub Actions**，然後發一個
-release（或手動跑 workflow）。頁面會自己從網址推出 owner 與 repo 名稱，
-`docs/index.html` 一個字都不用改。
 
 ### 為什麼不是由網頁直接去抓 release 附件
 
