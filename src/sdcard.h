@@ -5,6 +5,15 @@
 #define SD_DIR_ROOT     "/immich"
 #define SD_DIR_CACHE    "/immich/cache"
 #define SD_PATH_TMP     "/immich/tmp.img"
+// Which asset SD_PATH_TMP currently holds. The downloaded source used to be
+// deleted after a successful render; it is kept now so that the admin page's
+// preview can re-render the current photo without going back to the network,
+// and this marker is how a second preview knows it already has the right file.
+#define SD_PATH_TMPID   "/immich/tmp.id"
+// The admin page's preview: PREVIEW_W * PREVIEW_H * 3 bytes of raw RGB888.
+// Raw rather than an image format because there is no encoder on board --
+// PNGdec decodes only.
+#define SD_PATH_PREVIEW "/immich/preview.raw"
 #define SD_PATH_PLAYLIST "/immich/playlist.txt"
 #define SD_PATH_STATE   "/immich/state.txt"
 

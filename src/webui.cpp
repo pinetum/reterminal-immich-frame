@@ -5,7 +5,10 @@
 #include "net.h"
 #include "playlist.h"
 #include "log.h"
+#include "render.h"
+#include "sdcard.h"
 
+#include <SD.h>
 #include <ESPAsyncWebServer.h>
 #include <AsyncJson.h>
 #include <ArduinoJson.h>
@@ -53,6 +56,11 @@ static void sendStatus(AsyncWebServerRequest* req) {
   d["albumsErr"]      = g_status.albumsErr;
   d["albumsReady"]    = g_status.albumsJson.length() > 2;
   d["scanReady"]      = g_status.scanJson.length() > 2;
+  d["previewReady"]   = g_status.previewReady;
+  d["previewErr"]     = g_status.previewErr;
+  d["previewRot"]     = g_status.previewRotation;
+  d["previewW"]       = PREVIEW_W;
+  d["previewH"]       = PREVIEW_H;
   // The page needs to know an action is pending but not yet started, otherwise
   // it would see an empty `busy` on its first poll and declare victory early.
   d["queued"]         = g_status.action != ACT_NONE;
@@ -74,7 +82,6 @@ static void sendConfig(AsyncWebServerRequest* req) {
   d["shuffle"]             = g_cfg.shuffle;
   d["imageSize"]           = (int)g_cfg.imageSize;
   d["playlistTtlHours"]    = g_cfg.playlistTtlHours;
-  d["dither"]              = (int)g_cfg.dither;
   d["gamma"]               = g_cfg.gamma;
   d["fit"]                 = (int)g_cfg.fit;
   d["rotation"]            = g_cfg.rotation;
@@ -83,6 +90,62 @@ static void sendConfig(AsyncWebServerRequest* req) {
   d["lowBatteryPercent"]   = g_cfg.lowBatteryPercent;
   d["cacheFrames"]         = g_cfg.cacheFrames;
   d["adminUser"]           = g_cfg.adminUser;
+
+  // --- calibrated palette ---
+  d["paletteId"] = g_cfg.paletteId;
+  {
+    // Always report the CUSTOM slots, never the resolved palette: the six text
+    // fields in the admin page edit the custom entry, and overwriting them with
+    // whichever built-in is currently selected would quietly destroy the user's
+    // measurements the first time they looked at a built-in.
+    JsonArray a = d["paletteCustom"].to<JsonArray>();
+    char hex[8];
+    for (int i = 0; i < PAL_SLOTS; ++i) {
+      paletteHexFormat(g_cfg.paletteCustom.rgb[i], hex);
+      a.add(hex);
+    }
+    // The built-in tables, so the page can show swatches and prefill the custom
+    // fields from one of them without hardcoding a second copy of the values.
+    JsonObject b = d["paletteBuiltins"].to<JsonObject>();
+    for (int id = 0; id < PALETTE_IDS; ++id) {
+      JsonArray e = b[paletteIdName(id)].to<JsonArray>();
+      const E6Palette& p = paletteBuiltin(id);
+      for (int i = 0; i < PAL_SLOTS; ++i) { paletteHexFormat(p.rgb[i], hex); e.add(hex); }
+    }
+  }
+
+  // --- dithering ---
+  d["ditherType"]  = (int)g_cfg.dither.type;
+  d["edMatrix"]    = (int)g_cfg.dither.matrix;
+  d["colorMatch"]  = (int)g_cfg.dither.matching;
+  d["serpentine"]  = g_cfg.dither.serpentine;
+  d["bayerSize"]   = g_cfg.dither.bayerSize;
+  d["orderedStrength"] = g_cfg.dither.orderedStrength;
+
+  // --- pre-dither processing ---
+  const ProcSettings& ps = g_cfg.proc;
+  d["procPreset"]  = ps.preset;
+  d["exposure"]    = ps.exposure;
+  d["saturation"]  = ps.saturation;
+  d["toneMode"]    = ps.toneMode;
+  d["contrast"]    = ps.contrast;
+  d["scStrength"]  = ps.scStrength;
+  d["scShadow"]    = ps.scShadow;
+  d["scHighlight"] = ps.scHighlight;
+  d["scMidpoint"]  = ps.scMidpoint;
+  d["drcMode"]     = ps.drcMode;
+  d["drcStrength"] = ps.drcStrength;
+  d["drcLowPct"]   = ps.drcLowPct;
+  d["drcHighPct"]  = ps.drcHighPct;
+  d["drcQuality"]  = ps.drcQuality;
+  d["drcPreserveWhite"] = ps.drcPreserveWhite;
+  d["levelMode"]   = ps.levelMode;
+  d["levelAuto"]   = ps.levelAuto;
+  d["clarityAmount"]  = ps.clarityAmount;
+  d["clarityRadius"]  = ps.clarityRadius;
+  d["clarityMidtone"] = ps.clarityMidtone;
+  d["paperMode"]      = ps.paperMode;
+  d["paperStrength"]  = ps.paperStrength;
   // Secrets are never sent back out, only whether one is stored. The page sends
   // a secret only when the user types a new one; blank means "keep".
   d["hasWifiPass"]  = g_cfg.wifiPass.length() > 0;
@@ -100,7 +163,7 @@ static void applyConfig(AsyncWebServerRequest* req, JsonVariant& json) {
   if (d.isNull()) { req->send(400, "text/plain", "expected a JSON object"); return; }
 
   const String   oldAlbum = g_cfg.albumId;
-  const ImageSize oldSize = g_cfg.imageSize;
+  const uint32_t oldRenderSig = settingsRenderSignature(g_cfg);
 
   if (d["wifiSsid"].is<const char*>())  g_cfg.wifiSsid  = d["wifiSsid"].as<String>();
   if (d["immichUrl"].is<const char*>()) g_cfg.immichUrl = d["immichUrl"].as<String>();
@@ -118,7 +181,6 @@ static void applyConfig(AsyncWebServerRequest* req, JsonVariant& json) {
   if (!d["shuffle"].isNull())             g_cfg.shuffle           = d["shuffle"].as<bool>();
   if (!d["imageSize"].isNull())           g_cfg.imageSize         = (ImageSize)d["imageSize"].as<int>();
   if (!d["playlistTtlHours"].isNull())    g_cfg.playlistTtlHours  = d["playlistTtlHours"].as<uint32_t>();
-  if (!d["dither"].isNull())              g_cfg.dither            = (DitherMethod)d["dither"].as<int>();
   if (!d["gamma"].isNull())               g_cfg.gamma             = d["gamma"].as<float>();
   if (!d["fit"].isNull())                 g_cfg.fit               = (FitMode)d["fit"].as<int>();
   if (!d["rotation"].isNull())            g_cfg.rotation          = d["rotation"].as<int>();
@@ -126,6 +188,64 @@ static void applyConfig(AsyncWebServerRequest* req, JsonVariant& json) {
   if (!d["configWindowMinutes"].isNull()) g_cfg.configWindowMinutes = d["configWindowMinutes"].as<uint32_t>();
   if (!d["lowBatteryPercent"].isNull())   g_cfg.lowBatteryPercent = d["lowBatteryPercent"].as<uint32_t>();
   if (!d["cacheFrames"].isNull())         g_cfg.cacheFrames       = d["cacheFrames"].as<uint32_t>();
+
+  // --- calibrated palette ---
+  if (!d["paletteId"].isNull()) g_cfg.paletteId = (uint8_t)d["paletteId"].as<int>();
+  if (d["paletteCustom"].is<JsonArray>()) {
+    JsonArray a = d["paletteCustom"].as<JsonArray>();
+    for (int i = 0; i < PAL_SLOTS && i < (int)a.size(); ++i) {
+      const char* hex = a[i].as<const char*>();
+      // A slot that will not parse keeps its stored value rather than becoming
+      // black, which is what a naive parse-or-zero would do to a typo.
+      if (hex) paletteHexParse(hex, g_cfg.paletteCustom.rgb[i]);
+    }
+  }
+
+  // --- dithering ---
+  if (!d["ditherType"].isNull()) g_cfg.dither.type     = (DitherType)d["ditherType"].as<int>();
+  if (!d["edMatrix"].isNull())   g_cfg.dither.matrix   = (EdMatrix)d["edMatrix"].as<int>();
+  if (!d["colorMatch"].isNull()) g_cfg.dither.matching = (ColorMatching)d["colorMatch"].as<int>();
+  if (!d["serpentine"].isNull()) g_cfg.dither.serpentine = d["serpentine"].as<bool>();
+  if (!d["bayerSize"].isNull())  g_cfg.dither.bayerSize = (uint8_t)d["bayerSize"].as<int>();
+  if (!d["orderedStrength"].isNull())
+    g_cfg.dither.orderedStrength = (uint8_t)d["orderedStrength"].as<int>();
+
+  // --- pre-dither processing ---
+  ProcSettings& ps = g_cfg.proc;
+  if (!d["procPreset"].isNull())  ps.preset      = (uint8_t)d["procPreset"].as<int>();
+  if (!d["exposure"].isNull())    ps.exposure    = d["exposure"].as<float>();
+  if (!d["saturation"].isNull())  ps.saturation  = d["saturation"].as<float>();
+  if (!d["toneMode"].isNull())    ps.toneMode    = (uint8_t)d["toneMode"].as<int>();
+  if (!d["contrast"].isNull())    ps.contrast    = d["contrast"].as<float>();
+  if (!d["scStrength"].isNull())  ps.scStrength  = d["scStrength"].as<float>();
+  if (!d["scShadow"].isNull())    ps.scShadow    = d["scShadow"].as<float>();
+  if (!d["scHighlight"].isNull()) ps.scHighlight = d["scHighlight"].as<float>();
+  if (!d["scMidpoint"].isNull())  ps.scMidpoint  = d["scMidpoint"].as<float>();
+  if (!d["drcMode"].isNull())     ps.drcMode     = (uint8_t)d["drcMode"].as<int>();
+  if (!d["drcStrength"].isNull()) ps.drcStrength = d["drcStrength"].as<float>();
+  if (!d["drcLowPct"].isNull())   ps.drcLowPct   = d["drcLowPct"].as<float>();
+  if (!d["drcHighPct"].isNull())  ps.drcHighPct  = d["drcHighPct"].as<float>();
+  if (!d["drcQuality"].isNull())  ps.drcQuality  = (uint8_t)d["drcQuality"].as<int>();
+  if (!d["drcPreserveWhite"].isNull()) ps.drcPreserveWhite = d["drcPreserveWhite"].as<bool>();
+  if (!d["levelMode"].isNull())   ps.levelMode   = (uint8_t)d["levelMode"].as<int>();
+  if (!d["levelAuto"].isNull())   ps.levelAuto   = d["levelAuto"].as<bool>();
+  if (!d["clarityAmount"].isNull())  ps.clarityAmount  = d["clarityAmount"].as<float>();
+  if (!d["clarityRadius"].isNull())  ps.clarityRadius  = (uint8_t)d["clarityRadius"].as<int>();
+  if (!d["clarityMidtone"].isNull()) ps.clarityMidtone = d["clarityMidtone"].as<float>();
+  if (!d["paperMode"].isNull())      ps.paperMode      = (uint8_t)d["paperMode"].as<int>();
+  if (!d["paperStrength"].isNull())  ps.paperStrength  = d["paperStrength"].as<float>();
+
+  // The admin page sends this when the user has just picked a preset from the
+  // dropdown. The preset table lives in src/imgproc.cpp and nowhere else, so
+  // the page posts the choice and reloads rather than carrying its own copy of
+  // the values -- two copies of a tuning table is two copies that drift.
+  if (d["applyPreset"].as<bool>()) {
+    uint8_t cm = (uint8_t)g_cfg.dither.matching, ed = (uint8_t)g_cfg.dither.matrix;
+    imgprocPreset(ps.preset, &ps, &cm, &ed);
+    g_cfg.dither.matching = (ColorMatching)cm;
+    g_cfg.dither.matrix   = (EdMatrix)ed;
+    LOG.printf("[web] applied processing preset '%s'\n", procPresetName(ps.preset));
+  }
 
   settingsSave();
   settingsLoad();   // re-run the clamping that settingsLoad() applies
@@ -139,8 +259,13 @@ static void applyConfig(AsyncWebServerRequest* req, JsonVariant& json) {
     g_status.cacheInvalid = true;
     g_status.playlistInvalid = true;
     g_status.albumsJson = "";       // force a reload so the name matches
-  } else if (g_cfg.imageSize != oldSize) {
-    LOG.println("[web] image size changed -- frame cache will be dropped");
+  } else if (settingsRenderSignature(g_cfg) != oldRenderSig) {
+    // Any palette, dither or processing change makes every cached frame a
+    // picture of the OLD settings. This used to check only the image size,
+    // which was enough when the renderer had two knobs; with the calibrated
+    // palette in play a stale cache would mask the change entirely and look
+    // like the new setting simply did nothing.
+    LOG.println("[web] render settings changed -- frame cache will be dropped");
     g_status.cacheInvalid = true;
   }
 
@@ -157,7 +282,7 @@ static void queueAction(AsyncWebServerRequest* req, JsonVariant& json) {
   // Anything that has to reach Immich is pointless from the setup access point,
   // and saying so now beats a 20-second timeout later.
   if ((a == "albums" || a == "test" || a == "playlist" || a == "next" ||
-       a == "prev" || a == "refresh") && netIsAp()) {
+       a == "prev" || a == "refresh" || a == "preview") && netIsAp()) {
     req->send(503, "text/plain",
               "The frame is on its own setup network and cannot reach Immich yet. "
               "Fill in the Wi-Fi details, then press \"Save & reconnect\".");
@@ -174,6 +299,8 @@ static void queueAction(AsyncWebServerRequest* req, JsonVariant& json) {
   else if (a == "scan")     g_status.action = ACT_WIFI_SCAN;
   else if (a == "exit")     g_status.action = ACT_EXIT_CONFIG;
   else if (a == "reboot")   g_status.action = ACT_REBOOT;
+  else if (a == "preview")  g_status.action = ACT_PREVIEW;
+  else if (a == "chart")    g_status.action = ACT_PALETTE_CHART;
   else if (a == "index") {
     g_status.action = ACT_INDEX;
     g_status.actionArg = d["index"] | 1;
@@ -222,6 +349,24 @@ void webuiBegin() {
     if (g_status.albumsErr.length()) { req->send(502, "text/plain", g_status.albumsErr); return; }
     req->send(200, "application/json",
               g_status.albumsJson.length() ? g_status.albumsJson : String("[]"));
+  });
+
+  // The preview is raw RGB888 straight off the card -- PREVIEW_W * PREVIEW_H * 3
+  // bytes, no header. The page paints it into a <canvas> with ImageData. Raw
+  // because there is no image encoder in the firmware (PNGdec decodes only),
+  // and beginResponse(File) streams it without a copy in RAM.
+  s_srv->on("/api/preview.bin", HTTP_GET, [](AsyncWebServerRequest* req) {
+    if (!authed(req)) return;
+    if (!g_status.previewReady || !SD.exists(SD_PATH_PREVIEW)) {
+      req->send(404, "text/plain",
+                g_status.previewErr.length() ? g_status.previewErr
+                                             : String("no preview has been rendered yet"));
+      return;
+    }
+    AsyncWebServerResponse* r =
+        req->beginResponse(SD, SD_PATH_PREVIEW, "application/octet-stream");
+    r->addHeader("Cache-Control", "no-store");
+    req->send(r);
   });
 
   // AsyncCallbackJsonWebHandler does the body accumulation and JSON parsing, and

@@ -25,10 +25,20 @@ does exactly one thing each time it wakes.
 - Three front keys: next / previous / refresh; hold Refresh to open the settings
   page
 - Web admin UI: Wi-Fi, Immich server and API key, **album dropdown**, interval,
-  shuffle, image size, dithering algorithm, brightness, orientation, crop mode,
-  low-battery threshold, and more
+  shuffle, image size, orientation, crop mode, low-battery threshold, and the
+  whole image pipeline below
 - Full-resolution 1200×1600 colour Floyd–Steinberg error diffusion (see
   [Why this looks better than the vendor sample](#why-this-looks-better-than-the-vendor-sample))
+- **Calibrated palettes**: dithers against the colours the panel really
+  produces, not the saturated RGB it is nominally described with, including six
+  editable hex fields and an on-screen test chart for measuring your own panel
+- **Twelve error-diffusion kernels**, ordered/Bayer and random dithering,
+  serpentine scanning, and RGB / LAB / chroma colour matching
+- **Pre-dither processing**: exposure, saturation, contrast or S-curve tone
+  mapping, dynamic-range compression into the panel's real range, clarity and
+  warm-paper neutralisation, with seven presets
+- **Preview in the browser** — see the effect of a setting in a few seconds
+  instead of waiting 40 s for a panel refresh
 - Automatic photo orientation: landscape photos are rotated to 1600×1200,
   portrait photos use the panel's native orientation
 - SD frame cache: a photo you have already seen redisplays with no network and
@@ -116,9 +126,16 @@ AsyncTCP 3.5.0         ESPAsyncWebServer 3.12.1
 ```
 
 ```
-RAM   37.2%  (121 984 / 327 680 bytes)   ← internal RAM, excludes the 8 MB PSRAM
-Flash 36.3%  (1 214 797 / 3 342 336 bytes)
+RAM   40.7%  (133 400 / 327 680 bytes)   ← internal RAM, excludes the 8 MB PSRAM
+Flash 37.7%  (1 259 553 / 3 342 336 bytes)
 ```
+
+The calibrated-palette work added about 11 KB of that RAM and 45 KB of the
+flash. The RAM is almost entirely the sRGB↔linear and cube-root lookup tables in
+[`src/colorspace.cpp`](src/colorspace.cpp), which replace roughly 5.8 million
+`powf`/`cbrtf` calls per frame; they are static rather than allocated on demand
+because they can then never fail at the point of use. The flash is the new code
+plus about 17 KB of admin page.
 
 The code works on both Arduino core 2.x and 3.x. The only difference that bites
 is `File::name()`, which returns a full path on 2.x and a bare filename on 3.x;
@@ -256,6 +273,27 @@ patches and the reasoning behind them are in
 [`lib/JPEGDEC/PATCHES.md`](lib/JPEGDEC/PATCHES.md), and
 `test/host/test_jpeg.cpp` verifies them.
 
+### The second reason: the palette was wrong
+
+Everything above is about *affording* error diffusion. It is worth noting
+separately that until recently this firmware, like Seeed's sample, diffused
+against the wrong colours.
+
+An E Ink Spectra 6 panel's six inks are conventionally described by the
+saturated RGB you would like them to be — white `#FFFFFF`, red `#FF0000`. The
+panel does not produce those. Measured on real hardware its white is a light
+grey around `#B9C7C9` (a little over half the luminance of paper white) and its
+green is a very dark `#35563A`. aitjcize's colorimeter measurements put white
+30 % and green 73 % darker than theoretical.
+
+Quantising against the saturated values therefore answers the wrong question,
+and — worse for error diffusion — the error handed to the neighbouring pixels is
+computed against a colour the panel will never show, so those neighbours
+"correct" for a mistake that was never made. The fix is to match and diffuse
+against the *calibrated* colour while still emitting the device's own colour
+code, which is what [Calibrated palette and image
+processing](#calibrated-palette-and-image-processing) below describes.
+
 Before handing a file to the decoder, `decode_jpeg.cpp` walks the marker
 segments itself and applies exactly the same acceptance tests JPEGDEC does, so a
 failure logs the real cause (which SOF, which Huffman table) instead of a guess.
@@ -264,6 +302,155 @@ failure logs the real cause (which SOF, which Huffman table) instead of a guess.
 ```bash
 python3 tools/jpegprobe.py photo.jpg
 ```
+
+---
+
+## Calibrated palette and image processing
+
+Ported from two projects that solve this problem well:
+[paperlesspaper/epdoptimize](https://github.com/paperlesspaper/epdoptimize) (a
+JavaScript library and interactive tool for e-paper dithering) and
+[aitjcize/esp32-photoframe](https://github.com/aitjcize/esp32-photoframe) (the
+same ideas proven in C on an ESP32-S3), along with the latter's
+[epaper-image-convert](https://github.com/aitjcize/epaper-image-convert).
+
+**Everything here is off by default.** A device updated from an earlier build
+renders byte-for-byte what it rendered before — `test_dither` asserts exactly
+that against figures captured from the old firmware. Turning any of it on is a
+deliberate act.
+
+### Match calibrated, emit device
+
+The pipeline's central idea, which both references arrive at independently:
+
+```
+nearest-colour search   against the CALIBRATED colour   (what the panel shows)
+diffused error          against the CALIBRATED colour
+byte written to the panel                               the DEVICE colour code
+```
+
+epdoptimize needs a separate `replaceColors()` pass for that last step because
+it works in RGB canvases. We do not: this firmware's ditherer already emits
+4-bit nibble codes, and a nibble code *is* the device colour.
+
+### Palettes
+
+| Setting | Values | Source |
+|---|---|---|
+`Theoretical (saturated)` | `#FFFFFF #1DB954 #E53935 #FFD800 #004CFF #000000` | Seeed_GFX `dither.cpp` — **the default**, and what this firmware always used
+`Spectra 6 measured` | `#B9C7C9 #35563A #62201E #C1BB1E #233F8E #1F2226` | epdoptimize `spectra6` — its recommended calibration
+`…legacy` | `#E8E8E8 #125F20 #B21318 #EFDE44 #2157BA #191E21` | epdoptimize `spectra6legacy`
+`…Boeber` | `#D6D6D6 #067406 #EA4843 #DBD529 #416CE1 #1F2226` | epdoptimize `spectra6-boeber`
+`…aitjcize` | `#BEC8C8 #27663C #871300 #CDCA00 #05409E #020202` | epdoptimize `aitjcize-spectra6`, identical to esp32-photoframe's defaults
+`Custom` | six editable hex fields, stored in NVS | your own panel
+
+Spectra 6 batches differ, so none of the measured tables is right for every
+panel. **Draw the test chart** paints the six inks as solid bands; photograph
+the panel in even, indirect light, read each band with any colour picker, and
+type the values into the custom fields. That is the manual equivalent of
+esp32-photoframe's auto-sampling calibration wizard.
+
+### Dithering
+
+| Control | Options |
+|---|---|
+**Method** | Error diffusion (recommended), ordered/Bayer, random, nearest-colour only
+**Kernel** | Floyd–Steinberg, false Floyd–Steinberg, Atkinson, Jarvis–Judice–Ninke, Stucki, Burkes, Sierra-3, Sierra-2, Sierra-2-4A, Fan, Shiau–Fan, Shiau–Fan 2
+**Serpentine** | Alternates the scan direction each row, which removes the faint diagonal grain error diffusion leaves in flat areas
+**Colour distance** | `RGB` (plain Euclidean), `LAB` (perceptual ΔE), `chroma` (RGB plus penalties that keep saturated pastels from collapsing to white)
+
+Ordered and random dithering have no error feedback, so on a six-ink palette
+they cannot mix two inks to make a colour between them — a flat mid-grey comes
+out as one flat ink (green, as it happens, which really is the nearest Spectra 6
+colour to `#808080`). They are there for completeness; use error diffusion for
+photographs.
+
+### Pre-dither processing
+
+Stages run in this order, following `applyImageProcessing()` in epdoptimize and
+`preprocessImage()` in epaper-image-convert:
+
+> gamma → paper normalisation → clarity → exposure → saturation → tone
+> (contrast or S-curve) → dynamic range → level → white preservation
+
+The seven presets (`balanced`, `dynamic`, `vivid`, `soft`, `grayscale`,
+`restore`, `posterScan`) are epdoptimize's, converted once into the multiplier
+convention epaper-image-convert and esp32-photoframe use — exposure, saturation
+and contrast are `1.0` at neutral and highlight compression is positive, rather
+than epdoptimize's additive `0.0`/stops/negative form. The two are
+interchangeable; multipliers give the better slider ranges.
+
+**Dynamic-range compression** is the one worth understanding. The panel's white
+reflects a little over half as much light as paper white, so a photograph's full
+range cannot fit; this remaps luminance into the palette's own black→white range
+instead of letting both ends clip. `display` assumes the source fills 0–100 %;
+`auto` measures the photo's own percentiles first. A chroma-protection mask
+holds saturated pixels back so they are not flattened along with the neutrals.
+
+### How it fits a streaming renderer
+
+The references process a canvas that is already at output size and can walk it
+as many times as they like. We cannot: a 1200×1600 RGB888 intermediate is
+5.8 MB on top of a 960 KB frame and a multi-MB decoded source. esp32-photoframe
+hit the same wall and solved it the same way — keep everything row-local. So the
+stages are split three ways in [`src/imgproc.cpp`](src/imgproc.cpp):
+
+- **source pass** — gamma, paper normalisation and clarity, the stages that need
+  a 2D neighbourhood or must run before scaling. Streams over the decoded source
+  in place. Clarity replaces epdoptimize's two full-image scratch buffers with
+  two rings of `2·radius+1` rows, about 78 KB; `test_imgproc` proves the sliding
+  window is pixel-for-pixel identical to a whole-image box blur.
+- **analysis** — one read-only subsampled pass that resolves the percentile-driven
+  `auto` modes into numbers, over only the part of the source that will actually
+  reach the panel, so a cover-mode crop's discarded edges cannot skew the range.
+- **row pass** — everything pointwise, applied to one already-scaled output row
+  just before it is dithered. No intermediate and no re-quantisation to RGB565.
+
+When every stage is neutral — the default — the source pass is skipped entirely
+and the row pass is a no-op, so an un-reconfigured device pays nothing at all.
+
+### Deliberate deviations from the references
+
+- **Dynamic range is compressed in linear luminance, not Lab.** epdoptimize does
+  a per-pixel Lab round trip; esp32-photoframe explicitly chose luminance
+  scaling instead, because it preserves chromaticity and avoids the round trip
+  on-device, and their comment records that a per-channel remap "compresses
+  chroma along with lightness and visibly washes out midtones" and was reverted.
+  We follow them, and add epdoptimize's `auto` percentiles and chroma protection
+  on top. A `CIE L*` option is offered for the range mapping.
+- **Saturation is computed as a lerp towards the HSL lightness**, which is
+  algebraically the *same function* as the references' HSL round trip with the
+  trigonometry cancelled out, at about a tenth of the cost. `test_imgproc`
+  demonstrates the identity against a literal reimplementation rather than
+  asserting it.
+- **`random` dithering adds noise and then matches the palette.** epdoptimize's
+  `random` hard-codes each channel to 0 or 255 and ignores the palette, which is
+  meaningless for a six-ink panel.
+- **Paper normalisation exposes mode and strength only.** Its other seven
+  constants had exactly one tuned set of values in epdoptimize — the
+  `posterScan` preset — and those are what is hardcoded.
+- **Ordered dithering uses a threshold centred on zero**, where epdoptimize adds
+  a positive-only offset that brightens the whole image. The Bayer matrix is now
+  generated by epdoptimize's recursive construction, which is the transpose of
+  the hand-written table this firmware used to carry — indistinguishable, but
+  Bayer output is not bit-identical with earlier builds.
+
+**Not implemented:** blue-noise dithering (its mask is a 3.8 MB PNG),
+coverage-based ordered dithering and the edge-preservation/antialiasing passes
+(all three need a whole-image pass), and automatic processing suggestions.
+
+### Preview
+
+**Save & preview** re-renders the current photo and paints the result on the
+settings page, so twenty-odd new knobs are actually tunable. It costs a decode
+and a render — a few seconds — rather than a 40-second panel refresh.
+
+It renders the *real* full-resolution frame and then box-averages each 4×4 block
+of nibbles through the calibrated palette into 300×400. That is deliberately not
+the same as dithering at preview size, which would show grain four times too
+coarse; averaging the calibrated colours is what the eye does at viewing
+distance, so this is the honest preview. The source photo is kept on the SD card
+after a redraw (tagged with its asset id) so a second preview needs no download.
 
 ---
 
@@ -276,8 +463,12 @@ trade-offs:
 |---|---|
 **Image size** | Which rendition to ask Immich for. The default `preview` (1440 px on the long edge) is the right answer. `original` looks best but is slowest and may trigger the decode-time downscale. |
 **Orientation** | `Automatic` rotates landscape photos to 1600×1200 and assumes you turned the frame **clockwise** to hang it landscape. If photos come out upside down, pick the other landscape option. |
-**Dithering** | `Floyd-Steinberg` is the recommendation. `Jarvis` is smoother but slower; `Atkinson` has more contrast because it deliberately discards 2/8 of the error. |
-**Brightness (gamma)** | Above 1.0 brightens. Try 1.2 if photos look muddy and dark on the panel. |
+**Calibration** | Defaults to the saturated palette this firmware always used, so an update changes nothing. `Spectra 6 measured` is the one to try first; it is the single change that makes the most difference. |
+**Dithering kernel** | `Floyd-Steinberg` is the recommendation. `Jarvis` and `Stucki` are smoother but slower; `Atkinson` has more contrast because it deliberately discards 2/8 of the error. |
+**Colour distance** | `RGB` is predictable and fastest. `LAB` matches how the eye judges difference and costs roughly a second per frame. |
+**Preset** | Start at `Balanced` for photographs. `Restore` and `Poster scan` are for faded scans and documents, and are the only two that measure the photo before deciding. |
+**Clarity** | The most expensive stage: the only one that has to look at a pixel's neighbours, so it adds a second pass over the source. |
+**Brightness (gamma)** | Above 1.0 brightens. It overlaps **Exposure** and predates it; leave it at 1.0 unless you were already using it. |
 **Cached frames** | 960 KB each. A cached photo redisplays with no network and no decode, which makes a big difference to how the keys feel. |
 
 Secret fields (Wi-Fi password, API key, admin password) are **never** sent back
@@ -294,19 +485,32 @@ the JPEG patches) run on your computer — no device, no PlatformIO:
 ./test/host/run.sh
 ```
 
-Four suites:
+Six suites:
 
+- `test_palette` — the calibrated tables, checked digit by digit against the hex
+  quoted in the reference projects, plus the hex parsing behind the six custom
+  fields. A transposed digit here is invisible and affects everything
+  downstream, so it is worth pinning.
 - `test_stream` — proves the streaming 3-row error buffer is **pixel-for-pixel
-  identical** to a whole-image reference implementation (FS, Jarvis and Atkinson
-  all covered). This is the one that would catch a buffer-rotation bug.
-- `test_dither` — colour reconstruction accuracy per algorithm. Note that
+  identical** to a whole-image reference implementation, for all **twelve**
+  kernels and in **both** scan directions. This is the one that would catch a
+  buffer-rotation bug.
+- `test_imgproc` — the processing stages against independent reimplementations
+  of the reference code: the saturation shortcut versus a literal HSL round trip
+  (demonstrating they are the same function), the S-curve against
+  `applyScurveTonemap()`, dynamic-range compression landing on the palette's
+  measured endpoints, and the sliding-window clarity against a whole-image box
+  blur.
+- `test_dither` — colour reconstruction accuracy per kernel, palette and
+  matching mode, **plus the regression guard** that the default configuration
+  still renders exactly what it rendered before any of this existed. Note that
   Spectra 6 has no grey, so the nearest colour to mid-grey is actually *green*;
   the correct test is therefore that the *area-averaged RGB* comes back close to
-  the input, not the ratio of black to white dots. Measured mean error for FS is
-  0.4–5.0 out of 255.
+  the input, not the ratio of black to white dots.
 - `test_render` — coordinate mapping for all four rotations, cover filling the
-  canvas completely, contain's letterbox proportions, and 4bpp nibble packing
-  order.
+  canvas completely, contain's letterbox proportions, 4bpp nibble packing order,
+  the preview downsample, and that letterbox bars are the palette's white rather
+  than `#FFFFFF`.
 - `test_jpeg` — proves the `lib/JPEGDEC` patches do what they claim: a baseline
   JPEG and a variant carrying the *same* entropy-coded data behind an SOF1
   header with a third AC Huffman table must decode to identical pixels. Without
@@ -395,13 +599,16 @@ src/
   decode.cpp     format sniffing (magic bytes, not extensions), shared file access, allocation
   decode_jpeg.cpp  header probe + JPEGDEC with the decode-time downscale guard → PSRAM RGB565
   decode_png.cpp   PNGdec → PSRAM RGB565
-  render.cpp     streaming scale + rotate + dither → packed 4bpp
-  e6_dither.cpp  Spectra 6 palette and streaming error diffusion
+  render.cpp     streaming scale + rotate + process + dither → packed 4bpp; preview; test chart
+  imgproc.cpp    pre-dither stages: tone, dynamic range, clarity, paper normalisation, presets
+  e6_dither.cpp  streaming error diffusion, ordered/random, three colour-distance models
+  palette.cpp    the calibrated palette tables and hex parsing
+  colorspace.cpp table-driven sRGB ↔ linear ↔ CIELAB, shared by the two above
   webui.cpp      non-blocking admin API
   web_assets.h   the admin page (HTML/CSS/JS, in PROGMEM)
   tools/
     gpio_probe.cpp  standalone hardware self-test (separate PlatformIO env, never in the firmware)
-include/         pins.h, settings.h, e6_dither.h, log.h
+include/         pins.h, settings.h, palette.h, e6_dither.h, imgproc.h, colorspace.h, log.h
 lib/JPEGDEC/     the patched JPEGDEC (see PATCHES.md)
 test/host/       desktop tests
 tools/
@@ -435,6 +642,12 @@ only the little they share.
 coordinate mapping, which makes it a free index transform, and error diffusion
 still runs along the **destination** scan order — which is the order the eye
 reads the image in, and therefore the correct one.
+
+**Changing any render setting drops the frame cache.** A cached frame is a
+picture of the settings it was rendered under, so without this a palette change
+would be masked entirely and look like the setting simply did nothing.
+`settingsRenderSignature()` hashes every field that affects a rendered frame and
+the admin API compares it across a save.
 
 ---
 
@@ -501,6 +714,17 @@ a sudden reboot.
    `src/power.cpp`.
 7. **There is no wall clock.** No NTP; playlist age is estimated by accumulating
    sleep time, which is accurate enough to expire a daily TTL.
+8. **Ordered and random dithering cannot mix inks.** With no error feedback, a
+   single scalar threshold walks along the grey axis and the nearest ink never
+   changes, so a flat mid-grey comes out as one flat colour. epdoptimize solves
+   this with coverage-based Bayer, which needs a whole-image pass we cannot
+   afford. Use error diffusion for photographs.
+9. **No blue-noise dithering.** Its mask is a 3.8 MB PNG — larger than the
+   entire firmware.
+10. **The calibration workflow is manual.** The device draws the test chart;
+    reading the six patches off a photograph and typing them in is up to you.
+    esp32-photoframe automates this by uploading the photograph and
+    auto-sampling the grid, which needs an upload endpoint and grid detection.
 
 ---
 
@@ -510,3 +734,10 @@ a sudden reboot.
 - [Arduino Cookbook: Onboard Peripherals](https://wiki.seeedstudio.com/reterminal_e10xx_with_arduino_peripherals_2/) — the source for the key, LED, battery and SD pins
 - [Seeed_GFX](https://github.com/Seeed-Studio/Seeed_GFX) — the `EPaper` class and `Setup523`
 - [Immich API docs](https://api.immich.app/endpoints)
+
+The image pipeline is a port of prior art, and the credit belongs there:
+
+- [paperlesspaper/epdoptimize](https://github.com/paperlesspaper/epdoptimize) — calibrated palettes, the diffusion-kernel set, the three colour-distance models, the adjustment stack and its presets. There is an [interactive tool](https://paperlesspaper.github.io/epdoptimize/) and a [blog post](https://paperlesspaper.de/en/blog/dither-eink-tool-open-source).
+- [aitjcize/esp32-photoframe](https://github.com/aitjcize/esp32-photoframe) — the same ideas in C on an ESP32-S3, and the row-streaming and lookup-table techniques that make them affordable on one. Its [MEASURED_PALETTE.md](https://github.com/aitjcize/esp32-photoframe/blob/main/docs/MEASURED_PALETTE.md) is the clearest write-up of why measured palettes matter.
+- [aitjcize/epaper-image-convert](https://github.com/aitjcize/epaper-image-convert) — the tone-mapping maths and the parameter conventions used here.
+- epdoptimize in turn credits [DitherIt](https://ditherit.com/), [dither-me-this](https://github.com/DitheringIdiot/dither-me-this), [Inkify](https://github.com/cmdwtf/Inkify) and [eInk Dither Tester](https://github.com/mattcarter11/eink-dithering-tester).

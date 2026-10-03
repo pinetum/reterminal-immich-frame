@@ -26,10 +26,23 @@ void appRefreshStatus() {
 // How much PSRAM the decoder may use for the source image. The panel frame
 // (960 kB) is already allocated by the time this is asked, and ~1 MB is left
 // spare for Wi-Fi/TLS buffers and fragmentation headroom.
+// Defined below, next to the preview code it exists for.
+static void tmpMarkAsset(const String& assetId);
+
 static size_t decodeBudget() {
   const size_t freePs = ESP.getFreePsram();
   const size_t reserve = 1024u * 1024u;
   return (freePs > reserve + 256u * 1024u) ? (freePs - reserve) : 0;
+}
+
+// The preview path decodes BEFORE it allocates the panel frame and the RGB888
+// preview buffer -- the opposite order from appShowCurrent() -- so both have to
+// be reserved here, or a large original could decode into the space they then
+// need and leave decodeBudget()'s 1 MB headroom only nominally intact.
+static size_t previewDecodeBudget() {
+  const size_t b = decodeBudget();
+  const size_t later = PANEL_FRAME_BYTES + PREVIEW_BYTES;
+  return b > later ? b - later : 0;
 }
 
 bool appRefreshPlaylist() {
@@ -145,7 +158,11 @@ bool appShowCurrent(bool allowNetwork) {
 
     cacheStoreFrame(assetId, frame);
     cachePrune(g_cfg.cacheFrames);
-    SD.remove(SD_PATH_TMP);
+    // The source used to be deleted here. It is kept, tagged with its asset id,
+    // so the admin page's preview can re-render this photo under new settings
+    // without another download. One file, roughly the size of one Immich
+    // preview; the frame cache next to it is 960 kB per entry.
+    tmpMarkAsset(assetId);
     have = true;
   }
 
@@ -159,6 +176,109 @@ bool appShowCurrent(bool allowNetwork) {
   displayUpdate();
   playlistSave();
   g_status.lastError = "";
+  return true;
+}
+
+// SD_PATH_TMP is only useful if we know which photo is in it.
+static void tmpMarkAsset(const String& assetId) {
+  File f = SD.open(SD_PATH_TMPID, FILE_WRITE);
+  if (!f) return;
+  f.print(assetId);
+  f.close();
+}
+
+static bool tmpHoldsAsset(const String& assetId) {
+  if (!SD.exists(SD_PATH_TMP) || !SD.exists(SD_PATH_TMPID)) return false;
+  File f = SD.open(SD_PATH_TMPID, FILE_READ);
+  if (!f) return false;
+  String id = f.readString();
+  f.close();
+  id.trim();
+  return id == assetId;
+}
+
+bool appBuildPreview() {
+  g_status.previewReady = false;
+  g_status.previewErr = "";
+
+  const String assetId = playlistCurrentAsset();
+  if (assetId.isEmpty()) {
+    g_status.previewErr = "no photos in the playlist";
+    return false;
+  }
+  if (!sdReady()) {
+    g_status.previewErr = "no SD card -- the preview is written to it";
+    return false;
+  }
+
+  // The source is normally still on the card from the last redraw. It will not
+  // be if the photo came out of the frame cache, or after a reboot.
+  if (!tmpHoldsAsset(assetId)) {
+    if (!netConnected() && !netConnectSta()) {
+      g_status.previewErr = "Wi-Fi connection failed, and this photo's source is not on the card";
+      return false;
+    }
+    String err;
+    if (!immichDownloadAsset(assetId, SD_PATH_TMP, err)) {
+      SD.remove(SD_PATH_TMPID);
+      g_status.previewErr = "Immich: " + err;
+      return false;
+    }
+    tmpMarkAsset(assetId);
+  }
+
+  SrcImage src;
+  const DecodeResult dr = decodeToRgb565(SD_PATH_TMP, previewDecodeBudget(), &src);
+  if (dr != DEC_OK) {
+    srcFree(&src);
+    g_status.previewErr = String(decodeResultName(dr)) + " - " + decodeResultHint(dr);
+    return false;
+  }
+
+  uint8_t* buf = (uint8_t*)ps_malloc(PREVIEW_BYTES);
+  if (!buf) {
+    srcFree(&src);
+    g_status.previewErr = "out of memory (preview buffer)";
+    return false;
+  }
+
+  RenderStats st;
+  const bool ok = renderPreview(src, buf, &st);
+  srcFree(&src);
+  if (!ok) {
+    free(buf);
+    g_status.previewErr = "render failed (out of memory)";
+    return false;
+  }
+  g_status.renderMs = st.ms;
+  g_status.previewRotation = st.rotation;
+
+  // Written through a temporary name so a half-written file can never be served
+  // as a complete preview.
+  const char* tmpName = "/immich/preview.tmp";
+  SD.remove(tmpName);
+  File f = SD.open(tmpName, FILE_WRITE);
+  bool wrote = false;
+  if (f) {
+    wrote = f.write(buf, PREVIEW_BYTES) == PREVIEW_BYTES;
+    f.close();
+  }
+  free(buf);
+  if (!wrote) {
+    SD.remove(tmpName);
+    g_status.previewErr = "could not write the preview to the SD card";
+    return false;
+  }
+  SD.remove(SD_PATH_PREVIEW);
+  if (!SD.rename(tmpName, SD_PATH_PREVIEW)) {
+    SD.remove(tmpName);
+    g_status.previewErr = "could not replace the previous preview";
+    return false;
+  }
+
+  g_status.previewReady = true;
+  LOG.printf("[app] preview ready (%dx%d, %lu ms, rot=%d)\n", PREVIEW_W, PREVIEW_H,
+             (unsigned long)st.ms, st.rotation);
   return true;
 }
 
@@ -230,6 +350,27 @@ bool appRunPendingAction() {
       g_status.busy = "Scanning for networks";
       g_status.scanJson = netScanJson();
       break;
+    case ACT_PREVIEW:
+      g_status.busy = "Rendering a preview";
+      appBuildPreview();
+      break;
+    case ACT_PALETTE_CHART: {
+      g_status.busy = "Drawing the calibration chart";
+      uint8_t* frame = frameAlloc();
+      if (!frame) {
+        g_status.lastError = "out of memory (panel frame)";
+        break;
+      }
+      renderPaletteChart(frame);
+      displayPushFrame(frame);
+      frameFree(frame);
+      displayUpdate();
+      // The chart is not a photo, so the slideshow's idea of what is on screen
+      // is now wrong. Say so rather than letting the next wake assume the
+      // current asset is still displayed.
+      g_status.currentAsset = "(palette calibration chart)";
+      break;
+    }
     case ACT_EXIT_CONFIG:
       g_status.busy = "";
       return true;

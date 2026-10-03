@@ -1,5 +1,6 @@
 #include "settings.h"
 #include "render.h"
+#include "imgproc.h"
 #include "log.h"
 #include <cassert>
 #include <cstdio>
@@ -8,8 +9,11 @@
 Settings g_cfg;
 void settingsLoad(){} void settingsSave(){} void settingsFactoryReset(){}
 const char* imageSizeName(ImageSize){ return "preview"; }
-const char* ditherName(DitherMethod){ return "test"; }
 void logBegin(){} void logMem(const char*){}
+uint32_t settingsRenderSignature(const Settings&){ return 0; }
+const E6Palette& settingsPalette(const Settings& cfg) {
+  return cfg.paletteId == PAL_CUSTOM ? cfg.paletteCustom : paletteBuiltin(cfg.paletteId);
+}
 
 static inline uint8_t getNib(const uint8_t* f,int px,int py){
   const uint8_t b=f[(size_t)py*PANEL_STRIDE+(px>>1)];
@@ -18,7 +22,7 @@ static inline uint8_t getNib(const uint8_t* f,int px,int py){
 static uint16_t rgb565(int r,int g,int b){
   return (uint16_t)(((r>>3)<<11)|((g>>2)<<5)|(b>>3));
 }
-// Exact RGB565 encodings of the palette so DITHER_NONE round-trips cleanly.
+// Exact RGB565 encodings of the palette so quantise-only round-trips cleanly.
 static const uint16_t RED = rgb565(229,57,53), GREEN = rgb565(29,185,84),
                       BLUE = rgb565(0,76,255), BLACK = rgb565(0,0,0),
                       WHITE= rgb565(255,255,255);
@@ -35,7 +39,10 @@ static int fails=0;
 #define CHECK(c,msg) do{ if(!(c)){ printf("  FAIL: %s\n",msg); fails++; } }while(0)
 
 int main(){
-  g_cfg.dither=DITHER_NONE; g_cfg.gamma=1.0f; g_cfg.fit=FIT_CONTAIN;
+  // Quantise-only with the theoretical palette, so every box colour round-trips
+  // to its own ink and the geometry checks below are reading pure placement
+  // rather than dither noise.
+  g_cfg.dither.type=DITHER_QUANTIZE_ONLY; g_cfg.gamma=1.0f; g_cfg.fit=FIT_CONTAIN;
   uint8_t* f=frameAlloc();
 
   // ---- 1. rotation 0, 1:1, identity ---------------------------------------
@@ -129,6 +136,81 @@ int main(){
     printf("auto portrait  -> rot=%d canvas=%dx%d\n",st.rotation,st.logicalW,st.logicalH);
     CHECK(st.rotation==0,"auto: tall photo stays portrait");
     srcFree(&t);
+  }
+
+  // ---- 7. letterbox bars use the PALETTE white, not 0xFFFFFF --------------
+  // With a calibrated palette the two differ by ~70 units. Feeding pure white
+  // into the ditherer would leave a real quantisation error to diffuse into the
+  // first columns of the photo; feeding the palette's own white leaves none.
+  {
+    g_cfg = Settings();
+    g_cfg.paletteId=PAL_SPECTRA6;
+    g_cfg.fit=FIT_CONTAIN; g_cfg.rotation=0;
+    g_cfg.dither.type=DITHER_ERROR_DIFFUSION;
+    SrcImage s=mk(400,200,BLACK);                // wide + black, so bars stand out
+    RenderStats st; assert(renderFrame(s,f,&st));
+    // Top-left corner is inside the letterbox band for a 2:1 source on a 3:4
+    // panel, and must be exactly white with no stray dithered pixels.
+    int nonWhite=0;
+    for(int y=0;y<100;y++) for(int x=0;x<PANEL_W;x++)
+      if(getNib(f,x,y)!=E6_WHITE) nonWhite++;
+    printf("letterbox: %d non-white px in the top band\n",nonWhite);
+    CHECK(nonWhite==0,"letterbox bars must be solid palette white");
+    srcFree(&s);
+  }
+
+  // ---- 8. the source pass is skipped when every stage is neutral ----------
+  // This is the promise that an un-reconfigured device pays nothing for the new
+  // pipeline: no allocation, no sweep, no change to the decoded source.
+  {
+    g_cfg = Settings();
+    CHECK(!imgprocSourcePassNeeded(g_cfg.proc,g_cfg.gamma),
+          "default settings must not trigger the source pass");
+    g_cfg.gamma=1.2f;
+    CHECK(imgprocSourcePassNeeded(g_cfg.proc,g_cfg.gamma),"gamma must trigger it");
+    g_cfg.gamma=1.0f; g_cfg.proc.clarityAmount=0.3f;
+    CHECK(imgprocSourcePassNeeded(g_cfg.proc,g_cfg.gamma),"clarity must trigger it");
+    g_cfg.proc.clarityAmount=0.0f; g_cfg.proc.paperMode=PAPER_WARM;
+    CHECK(imgprocSourcePassNeeded(g_cfg.proc,g_cfg.gamma),"paper normalisation must trigger it");
+    printf("source pass gating: ok\n");
+  }
+
+  // ---- 9. the preview downsample ------------------------------------------
+  {
+    g_cfg = Settings();
+    g_cfg.rotation=0; g_cfg.fit=FIT_COVER;
+    g_cfg.dither.type=DITHER_QUANTIZE_ONLY;
+    SrcImage s=mk(PANEL_W,PANEL_H,RED);
+    uint8_t* prev=(uint8_t*)malloc(PREVIEW_BYTES);
+    RenderStats st;
+    CHECK(renderPreview(s,prev,&st),"renderPreview must succeed");
+    // A uniform red source quantises entirely to the red ink, so every 4x4
+    // block averages to exactly the palette's red.
+    const E6Palette& pal=settingsPalette(g_cfg);
+    int off=0;
+    for(size_t i=0;i<PREVIEW_BYTES;i+=3)
+      if(prev[i]!=pal.rgb[PAL_RED][0]||prev[i+1]!=pal.rgb[PAL_RED][1]||
+         prev[i+2]!=pal.rgb[PAL_RED][2]) off++;
+    printf("preview: %dx%d, %d of %d pixels off the expected ink\n",
+           PREVIEW_W,PREVIEW_H,off,PREVIEW_W*PREVIEW_H);
+    CHECK(off==0,"a uniform source must preview as a uniform palette colour");
+    free(prev);
+    srcFree(&s);
+  }
+
+  // ---- 10. the calibration chart is six solid bands -----------------------
+  {
+    renderPaletteChart(f);
+    int bands=0; uint8_t last=0xFF;
+    for(int y=0;y<PANEL_H;y++){
+      const uint8_t c=getNib(f,0,y);
+      int row=0;
+      for(int x=0;x<PANEL_W;x++) if(getNib(f,x,y)!=c) row++;
+      CHECK(row==0,"each chart row must be one solid ink");
+      if(c!=last){ bands++; last=c; }
+    }
+    printf("palette chart: %d bands\n",bands);
+    CHECK(bands==PAL_SLOTS,"the chart must show all six inks");
   }
 
   frameFree(f);

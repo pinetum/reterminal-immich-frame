@@ -1,6 +1,8 @@
 #pragma once
 #include <Arduino.h>
-#include "e6_dither.h"   // DitherMethod lives with the ditherer itself
+#include "e6_dither.h"   // DitherCfg lives with the ditherer itself
+#include "imgproc.h"     // ProcSettings lives with the processor
+#include "palette.h"
 
 // Which Immich rendition to fetch. `preview` (1440px long edge by default) is
 // the sweet spot for a 1200x1600 panel: big enough, already web-friendly JPEG,
@@ -35,11 +37,19 @@ struct Settings {
   uint32_t playlistTtlHours = 24;
 
   // --- rendering ---
-  DitherMethod dither = DITHER_FS;
   float    gamma      = 1.0f;
   FitMode  fit        = FIT_COVER;
   int      rotation   = ROTATION_AUTO;
   bool     showFooter = false;
+
+  // Calibrated palette. PAL_SEEED is the saturated table this firmware always
+  // used, so the default leaves an existing device's output untouched; see the
+  // long comment in palette.h for why a measured palette is better.
+  uint8_t   paletteId = PAL_SEEED;
+  E6Palette paletteCustom = paletteBuiltin(PAL_SPECTRA6);
+
+  DitherCfg    dither;   // defaults: error diffusion, Floyd-Steinberg, RGB matching
+  ProcSettings proc;     // defaults: every stage neutral
 
   // --- power / housekeeping ---
   uint32_t configWindowMinutes = 10;
@@ -62,5 +72,13 @@ void settingsLoad();
 void settingsSave();
 void settingsFactoryReset();
 
+// The palette the renderer should use, resolved from paletteId/paletteCustom.
+const E6Palette& settingsPalette(const Settings& cfg);
+
+// Hash over everything that changes what a rendered frame LOOKS like. The
+// admin page compares this across a save so that the SD frame cache can be
+// dropped when it moves -- without it, a palette change would keep being
+// masked by frames rendered under the old settings.
+uint32_t settingsRenderSignature(const Settings& cfg);
+
 const char* imageSizeName(ImageSize s);
-const char* ditherName(DitherMethod d);

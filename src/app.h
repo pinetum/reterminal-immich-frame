@@ -20,6 +20,13 @@ enum PendingAction {
   ACT_WIFI_SCAN,
   ACT_EXIT_CONFIG,
   ACT_REBOOT,
+  // Re-render the current photo at 1/4 scale into SD_PATH_PREVIEW so the
+  // settings page can show the effect of the processing options without
+  // spending a 40-second panel refresh on every tweak.
+  ACT_PREVIEW,
+  // Paint the six palette inks as solid bands, for measuring them with a
+  // camera and a colour picker. Costs a real refresh, like any other draw.
+  ACT_PALETTE_CHART,
 };
 
 struct AppStatus {
@@ -42,6 +49,9 @@ struct AppStatus {
   String  testMsg;           // result of ACT_IMMICH_TEST
   bool    testOk = false;
   String  scanJson;          // result of ACT_WIFI_SCAN
+  bool    previewReady = false;   // SD_PATH_PREVIEW holds a current preview
+  String  previewErr;             // why the last ACT_PREVIEW failed
+  int     previewRotation = 0;    // rotation the preview was composed at
 
   // Set by the config handler, acted on by the main task so SD access stays on
   // one task.
@@ -70,6 +80,11 @@ bool appShowCurrent(bool allowNetwork);
 
 // Re-read the album from Immich into the playlist on SD.
 bool appRefreshPlaylist();
+
+// Re-render the current photo into SD_PATH_PREVIEW. Downloads the source first
+// if SD_PATH_TMP does not already hold it. Main task only: decodes, touches SD
+// and may use the network.
+bool appBuildPreview();
 
 // Run whatever the admin page queued. Returns true if the caller should leave
 // config mode.
